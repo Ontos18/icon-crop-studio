@@ -1,6 +1,6 @@
 # Icon Crop Studio
 
-最快制作 Windows ICO 的批量裁切工具（开发中）。
+Windows ICO 的批量裁切工具（开发中）。
 
 ## 运行（Windows 10/11）
 
