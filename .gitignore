@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 测试/缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 调试残留
+.ex_*/
+*.stackdump
+z_render.png
+verify_export.py
+
+# 编辑器 / 环境 / 工具
+.vscode/
+.idea/
+.claude/
+.env
+
+# 打包产物
+build/
+dist/
+
+docs/
