@@ -141,3 +141,17 @@ def test_wheel_steps_are_configurable(app) -> None:
     before = editor2._zoom_factor()
     editor2.wheelEvent(_wheel_event(120, Qt.KeyboardModifier.ControlModifier))
     assert editor2._zoom_factor() == pytest.approx(before * 2.0)
+
+
+def test_resize_mode_hides_and_disables_crop_overlay(app) -> None:
+    editor = _editor_with_image(app)
+    before = editor.current_state()
+    editor.set_crop_enabled(False)
+    assert editor.crop_enabled is False
+
+    # Crop-specific Shift+wheel no longer changes the model.
+    editor.wheelEvent(_wheel_event(-120, Qt.KeyboardModifier.ShiftModifier))
+    assert editor.current_state() == before
+
+    # Rendering the full-image mode must remain error-free.
+    _render(editor)

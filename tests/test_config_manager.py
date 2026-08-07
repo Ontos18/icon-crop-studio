@@ -97,3 +97,18 @@ def test_wheel_steps_defaulted_and_persisted(tmp_path: Path) -> None:
     m2 = ConfigManager(missing).load()
     assert m2.wheel_resize_step == 100
     assert m2.wheel_zoom_step == 1.25
+
+
+def test_resize_mode_settings_persist(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    manager = ConfigManager(path)
+    manager.load()
+    manager.config.processing_mode = "resize"
+    manager.config.resize_axis = "height"
+    manager.config.resize_value = 400
+    assert manager.save()
+
+    loaded = ConfigManager(path).load()
+    assert loaded.processing_mode == "resize"
+    assert loaded.resize_axis == "height"
+    assert loaded.resize_value == 400

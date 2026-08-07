@@ -391,6 +391,8 @@ class MainWindow(QMainWindow):
             lambda w, h: self.panel_editor.set_aspect(w, h))
         # 导出面板的模式单选 -> 主窗口统一入口（与工具栏/快捷键同步）。
         self.panel_export.wrap_mode_changed.connect(self._on_panel_wrap_changed)
+        self.panel_export.processing_mode_changed.connect(
+            self._on_processing_mode_changed)
         # 切换尺寸比例组 -> 状态栏提示（静默清空不再无解释）。
         self.panel_export.aspect_switched.connect(self._on_aspect_switched)
         self.panel_export.set_export_enabled(False)
@@ -400,6 +402,7 @@ class MainWindow(QMainWindow):
         aspect = self.panel_export.active_aspect
         if aspect is not None:
             self.panel_editor.set_aspect(*aspect)
+        self._apply_processing_mode(self.panel_export.processing_mode)
 
         for index, stretch in enumerate(_PANE_STRETCH):
             self._splitter.setStretchFactor(index, stretch)
@@ -486,6 +489,20 @@ class MainWindow(QMainWindow):
         """导出面板单选变化；与工具栏/快捷键共享同一应用入口。"""
         self._apply_wrap_mode(wrap)
 
+    def _on_processing_mode_changed(self, mode: str) -> None:
+        self._apply_processing_mode(mode)
+
+    def _apply_processing_mode(self, mode: str) -> None:
+        """Switch the canvas and crop-only actions between crop/resize."""
+        cropping = mode == "crop"
+        self.panel_editor.set_crop_enabled(cropping)
+        self.action_wrap_mode.setEnabled(cropping)
+        self.action_reset_crop.setEnabled(cropping and self.panel_editor.has_image())
+        self._preview_service.bump_generation()
+        self._schedule_preview()
+        if hasattr(self, "_status_message"):
+            self._update_status()
+
     def _on_aspect_switched(self, aw: int, ah: int) -> None:
         """用户切换尺寸比例组时给出状态栏反馈（提示清空了其他比例）。"""
         self.statusBar().showMessage(
@@ -558,6 +575,7 @@ class MainWindow(QMainWindow):
         self.panel_thumbnails.refresh()
         self.panel_editor.clear()
         self._displayed_path = None
+        self.panel_export.set_source_size(0, 0)
         self.panel_export.set_preview(QImage())
         self._update_navigation_actions()
         self._update_status()
@@ -592,6 +610,7 @@ class MainWindow(QMainWindow):
             self._preview_service.bump_generation()
         else:
             self._displayed_path = None
+            self.panel_export.set_source_size(0, 0)
             self.panel_export.set_preview(QImage())
         self._update_navigation_actions()
         self._update_status()
@@ -600,7 +619,11 @@ class MainWindow(QMainWindow):
         """图片解码完成并显示：应用位置记忆、刷新预览与状态栏。"""
         if self._displayed_path != path:
             return      # 用户已切换到其他图片
-        if (self._config_manager.config.remember_crop_between_images
+        size = self.panel_editor.image_size()
+        if size is not None:
+            self.panel_export.set_source_size(*size)
+        if (self.panel_export.processing_mode == "crop"
+                and self._config_manager.config.remember_crop_between_images
                 and self._last_crop_relative is not None):
             self._apply_relative_crop()
         self._preview_service.bump_generation()
@@ -638,7 +661,9 @@ class MainWindow(QMainWindow):
         has_image = self.panel_editor.has_image()
         self.action_export.setEnabled(has_image)
         self.action_export_next.setEnabled(has_image)
-        self.action_reset_crop.setEnabled(has_image)
+        cropping = self.panel_export.processing_mode == "crop"
+        self.action_reset_crop.setEnabled(has_image and cropping)
+        self.action_wrap_mode.setEnabled(cropping)
         self.panel_export.set_export_enabled(has_image)
 
     # -------------------------------------------------------------- export
@@ -691,6 +716,8 @@ class MainWindow(QMainWindow):
                    error=error), 6000)
 
     def _on_crop_changed(self, state: CropState) -> None:
+        if self.panel_export.processing_mode != "crop":
+            return
         size = self.panel_editor.image_size()
         if size is not None and size[0] > 0 and size[1] > 0:
             # 记录归一化的中心点与宽度占比，保证不同尺寸图片之间可移植。
@@ -724,10 +751,15 @@ class MainWindow(QMainWindow):
         if item is not None:
             parts = [item.name]
             crop = self.panel_editor.current_state()
-            if crop is not None:
+            if crop is not None and self.panel_export.processing_mode == "crop":
                 parts.append(tr("status.crop",
                                 size=f"{crop.w}×{crop.h}",
                                 x=crop.x, y=crop.y))
+            elif self.panel_export.processing_mode == "resize":
+                sizes = self.panel_export.effective_sizes()
+                if sizes:
+                    w, h = sizes[0]
+                    parts.append(tr("status.resize", width=w, height=h))
             parts.append(tr("status.images_loaded",
                             count=len(self._collection)))
             self._status_message.setText("  —  ".join(parts))
@@ -745,7 +777,8 @@ class MainWindow(QMainWindow):
     def _refresh_preview(self) -> None:
         item = self._collection.current_item
         crop = self.panel_editor.current_state()
-        if item is None or crop is None or not self.panel_export.selected_sizes():
+        sizes = self.panel_export.effective_sizes()
+        if item is None or crop is None or not sizes:
             self.panel_export.set_preview(QImage())
             return
         # Bump the generation so only the newest request's result is shown
@@ -753,7 +786,8 @@ class MainWindow(QMainWindow):
         self._preview_service.bump_generation()
         self._preview_service.request(
             item.path, crop, brightness=self.panel_editor.brightness(),
-            wrap=self._config_manager.config.wrap_mode)
+            wrap=self._config_manager.config.wrap_mode,
+            processing_mode=self.panel_export.processing_mode)
 
     def _on_preview_ready(self, path: str, image: QImage) -> None:
         item = self._collection.current_item
@@ -781,6 +815,7 @@ class MainWindow(QMainWindow):
             if item is None:
                 self.panel_editor.clear()
                 self._displayed_path = None
+                self.panel_export.set_source_size(0, 0)
                 self.panel_export.set_preview(QImage())
             else:
                 self._select_image(self._collection.current_index)

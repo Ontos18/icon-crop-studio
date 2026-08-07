@@ -6,7 +6,8 @@ from pathlib import Path
 from PIL import Image
 
 from core.exporter import (
-    ExportSettings, crop_to_preview, export_crop, validate_settings,
+    ExportSettings, crop_to_preview, export_crop, proportional_size,
+    validate_settings,
 )
 from models.crop_box import CropBoxModel, CropState
 
@@ -260,3 +261,71 @@ def test_wrap_preview_matches_export_pixels(tmp_path: Path) -> None:
     preview = crop_to_preview(source, crop, max_size=800, wrap=True)
     assert preview.size == (800, 800)
     assert list(preview.tobytes()) == list(exported.tobytes())
+
+
+# ---------------------------------------------------------- 等比缩放模式
+def test_proportional_size_by_width_and_height() -> None:
+    assert proportional_size(1600, 800, "width", 400) == (400, 200)
+    assert proportional_size(1600, 800, "height", 400) == (800, 400)
+    assert proportional_size(3, 2, "width", 10) == (10, 7)
+
+
+def test_resize_mode_exports_full_image_by_width(tmp_path: Path) -> None:
+    source = _make_source(tmp_path, size=(100, 80))
+    # Crop deliberately points at only the green area; resize mode must ignore it.
+    result = export_crop(
+        source, CropState(10, 10, 30, 30),
+        _settings(tmp_path, formats=("png",), sizes=(),
+                  processing_mode="resize", resize_axis="width",
+                  resize_value=50))
+    assert result.ok, result.error
+    assert result.outputs[0].name == "sample_50x40.png"
+    with Image.open(result.outputs[0]) as image:
+        assert image.size == (50, 40)
+        # Top-left is red in the full source, proving it was not crop-only output.
+        r, g, b, a = image.convert("RGBA").getpixel((1, 1))
+    assert r > 200 and g < 50 and b < 50 and a == 255
+
+
+def test_resize_mode_exports_by_height(tmp_path: Path) -> None:
+    source = _make_source(tmp_path, size=(160, 80))
+    result = export_crop(
+        source, CropState(0, 0, 1, 1),
+        _settings(tmp_path, formats=("jpg",), sizes=(),
+                  processing_mode="resize", resize_axis="height",
+                  resize_value=100))
+    assert result.ok, result.error
+    with Image.open(result.outputs[0]) as image:
+        assert image.size == (200, 100)
+
+
+def test_resize_mode_validates_without_crop_sizes(tmp_path: Path) -> None:
+    settings = _settings(
+        tmp_path, formats=("png",), sizes=(), processing_mode="resize",
+        resize_axis="width", resize_value=400)
+    assert validate_settings(settings) is None
+    assert validate_settings(_settings(
+        tmp_path, sizes=(), processing_mode="resize",
+        resize_axis="diagonal")) == "msg.resize_invalid"
+
+
+def test_resize_mode_ico_checks_computed_other_edge(tmp_path: Path) -> None:
+    source = _make_source(tmp_path, size=(100, 200))
+    result = export_crop(
+        source, CropState(0, 0, 1, 1),
+        _settings(tmp_path, sizes=(), processing_mode="resize",
+                  resize_axis="width", resize_value=200))
+    assert not result.ok
+    assert result.error == "msg.ico_too_large"
+
+
+def test_resize_mode_rejects_extreme_computed_dimension(tmp_path: Path) -> None:
+    source = tmp_path / "extreme.png"
+    Image.new("RGBA", (1, 100), (255, 0, 0, 255)).save(source)
+    result = export_crop(
+        source, CropState(0, 0, 1, 1),
+        _settings(tmp_path, formats=("png",), sizes=(),
+                  processing_mode="resize", resize_axis="width",
+                  resize_value=1000))
+    assert not result.ok
+    assert result.error == "msg.resize_too_large"

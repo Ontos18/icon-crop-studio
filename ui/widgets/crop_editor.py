@@ -151,6 +151,8 @@ class CropEditor(QGraphicsView):
         self._aspect: tuple[int, int] = (1, 1)
         #: 包裹模式：裁切框可越过图片边界，图片外的场景区域标识填充区。
         self._wrap_mode = False
+        #: False 时展示完整图片，不绘制/操作裁切框（等比缩放模式）。
+        self._crop_enabled = True
         #: WASD 每步移动的像素数（无修饰键时）。
         self._move_speed = max(1, int(move_speed))
         #: Shift+滚轮缩放裁切框的每格步长（像素）。
@@ -318,6 +320,22 @@ class CropEditor(QGraphicsView):
         self._notify()
         self.fit_to_window()
 
+    def set_crop_enabled(self, enabled: bool) -> None:
+        """Show and enable the crop overlay only in crop processing mode."""
+        enabled = bool(enabled)
+        if enabled == self._crop_enabled:
+            return
+        self._crop_enabled = enabled
+        self._drag_mode = None
+        self._update_scene_rect()
+        self._emit_history_state()
+        self.fit_to_window()
+        self.viewport().update()
+
+    @property
+    def crop_enabled(self) -> bool:
+        return self._crop_enabled
+
     @property
     def wrap_mode(self) -> bool:
         return self._wrap_mode
@@ -331,7 +349,7 @@ class CropEditor(QGraphicsView):
         if self._pixmap_item is None:
             return
         base = QRectF(self._pixmap_item.pixmap().rect())
-        if self._wrap_mode and self._model is not None:
+        if self._crop_enabled and self._wrap_mode and self._model is not None:
             aw, ah = self._model.aspect
             k = wrap_max_k(int(base.width()), int(base.height()), (aw, ah))
             w, h = k * aw, k * ah
@@ -383,8 +401,8 @@ class CropEditor(QGraphicsView):
         self.crop_changed.emit(self._model.state)
 
     def _emit_history_state(self) -> None:
-        self.undo_available.emit(self._undo.can_undo)
-        self.redo_available.emit(self._undo.can_redo)
+        self.undo_available.emit(self._crop_enabled and self._undo.can_undo)
+        self.redo_available.emit(self._crop_enabled and self._undo.can_redo)
 
     def _zoom_factor(self) -> float:
         return self.transform().m11()
@@ -433,6 +451,8 @@ class CropEditor(QGraphicsView):
         super().drawForeground(painter, rect)
         if self._model is None:
             self._draw_empty_hint(painter)
+            return
+        if not self._crop_enabled:
             return
         # 包裹模式：图片外的场景区域标识为填充区（透明/白）。
         self._paint_fill_area(painter)
@@ -529,7 +549,8 @@ class CropEditor(QGraphicsView):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
-        if event.button() == Qt.MouseButton.LeftButton and self._model:
+        if (self._crop_enabled
+                and event.button() == Qt.MouseButton.LeftButton and self._model):
             hit = self._hit_test(self.mapToScene(event.position().toPoint()))
             if hit is not None:
                 self._drag_mode = hit
@@ -550,7 +571,8 @@ class CropEditor(QGraphicsView):
             event.accept()
             return
 
-        if self._drag_mode is not None and self._model is not None:
+        if (self._crop_enabled and self._drag_mode is not None
+                and self._model is not None):
             scene_pos = self.mapToScene(event.position().toPoint())
             dx = round(scene_pos.x() - self._drag_last.x())
             dy = round(scene_pos.y() - self._drag_last.y())
@@ -573,7 +595,7 @@ class CropEditor(QGraphicsView):
             return
 
         # hover feedback
-        if self._model is not None:
+        if self._crop_enabled and self._model is not None:
             hit = self._hit_test(self.mapToScene(event.position().toPoint()))
             self.setCursor(_CURSORS.get(hit, Qt.CursorShape.ArrowCursor)
                            if hit else Qt.CursorShape.ArrowCursor)
@@ -612,7 +634,7 @@ class CropEditor(QGraphicsView):
     # --------------------------------------------------------------- wheel
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
         modifiers = event.modifiers()
-        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+        if self._crop_enabled and modifiers & Qt.KeyboardModifier.ShiftModifier:
             # Shift+滚轮：居中缩放裁切框（上滚放大、下滚缩小），替代原 Q/E。
             if self._model is not None:
                 step = self._wheel_resize_step
@@ -635,7 +657,7 @@ class CropEditor(QGraphicsView):
 
     # ------------------------------------------------------------ keyboard
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
-        if self._model is None:
+        if self._model is None or not self._crop_enabled:
             super().keyPressEvent(event)
             return
         modifiers = event.modifiers()

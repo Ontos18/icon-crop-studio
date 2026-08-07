@@ -17,13 +17,13 @@ from PIL import Image
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 from PySide6.QtGui import QImage
 
-from core.exporter import crop_to_preview
+from core.exporter import crop_to_preview, image_to_preview
 from models.crop_box import CropState
 
 logger = logging.getLogger(__name__)
 
-#: (path, x, y, w, h, brightness, wrap) — uniquely identifies one crop+look.
-PreviewKey = tuple[str, int, int, int, int, int, bool]
+#: Uniquely identifies one crop/full-image preview request.
+PreviewKey = tuple[str, int, int, int, int, int, bool, str]
 
 
 class _PreviewSignals(QObject):
@@ -37,7 +37,7 @@ class _PreviewTask(QRunnable):
 
     def __init__(self, path: Path, crop: CropState, max_size: int,
                  generation: int, brightness: int = 0,
-                 wrap: bool = False) -> None:
+                 wrap: bool = False, processing_mode: str = "crop") -> None:
         super().__init__()
         self._path = path
         self._crop = crop
@@ -45,17 +45,24 @@ class _PreviewTask(QRunnable):
         self._generation = generation
         self._brightness = brightness
         self._wrap = wrap
+        self._processing_mode = processing_mode
         self._key: PreviewKey = (
-            str(path), crop.x, crop.y, crop.w, crop.h, brightness, wrap)
+            str(path), crop.x, crop.y, crop.w, crop.h, brightness, wrap,
+            processing_mode)
         self.signals = _PreviewSignals()
         self.setAutoDelete(True)
 
     def run(self) -> None:
         image = QImage()
         try:
-            image = _pil_to_qimage(crop_to_preview(
-                self._path, self._crop, self._max_size, self._brightness,
-                self._wrap))
+            if self._processing_mode == "resize":
+                preview = image_to_preview(
+                    self._path, self._max_size, self._brightness)
+            else:
+                preview = crop_to_preview(
+                    self._path, self._crop, self._max_size, self._brightness,
+                    self._wrap)
+            image = _pil_to_qimage(preview)
         except Exception:                        # never kill the pool
             logger.exception("Preview failed for %s", self._path)
         self.signals.finished.emit(self._key, self._generation, image)
@@ -95,15 +102,16 @@ class PreviewService(QObject):
         self._generation += 1
 
     def request(self, path: Path, crop: CropState, max_size: int = 256,
-                brightness: int = 0, wrap: bool = False) -> bool:
+                brightness: int = 0, wrap: bool = False,
+                processing_mode: str = "crop") -> bool:
         """Queue one preview; refuses duplicates of an in-flight crop."""
         key: PreviewKey = (str(path), crop.x, crop.y, crop.w, crop.h,
-                           brightness, wrap)
+                           brightness, wrap, processing_mode)
         if key in self._in_flight:
             return False
         self._in_flight.add(key)
         task = _PreviewTask(path, crop, max_size, self._generation,
-                            brightness, wrap)
+                            brightness, wrap, processing_mode)
         task.signals.finished.connect(self._on_finished)
         self._pool.start(task)
         return True

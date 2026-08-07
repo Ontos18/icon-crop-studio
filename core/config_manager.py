@@ -70,6 +70,12 @@ class AppConfig:
     overwrite_existing: bool = True
     #: 导出文件名模板，见 core.naming（默认 {name}_{size}.{format}）。
     filename_template: str = "{name}_{size}.{format}"
+    #: 图片处理方式："crop" 裁切，"resize" 保留完整图片并等比缩放。
+    processing_mode: str = "crop"
+    #: 等比缩放时固定的边："width" 或 "height"。
+    resize_axis: str = "width"
+    #: 等比缩放时目标边长（像素）。
+    resize_value: int = 256
 
     # --- UI --------------------------------------------------------------
     language: str = "zh_CN"

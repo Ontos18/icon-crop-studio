@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 EXPORT_FORMATS: tuple[str, ...] = ("ico", "png", "jpg")
 
 _ICO_MAX_SIZE = 256          # Windows icon format's hard per-frame limit
+_RESIZE_MAX_SIZE = 32768     # defensive limit against accidental huge output
 _JPG_BACKGROUND = (255, 255, 255)   # alpha is flattened onto white
 
 #: Alias kept for callers/tests that build size tuples.
@@ -50,6 +51,9 @@ class ExportSettings:
     template: str = DEFAULT_TEMPLATE     # 文件名模板，见 core.naming
     brightness: int = 0                  # -100（暗）~ 100（亮），0 = 原图
     wrap: bool = False                   # 包裹模式：越界区域填充背景（PNG 透明/JPG 白）
+    processing_mode: str = "crop"        # "crop" / "resize"
+    resize_axis: str = "width"           # resize 模式固定 width / height
+    resize_value: int = 256               # resize 模式目标边长（像素）
 
 
 @dataclass
@@ -72,15 +76,25 @@ def validate_settings(settings: ExportSettings) -> str | None:
         return "msg.no_output_dir"
     if not settings.formats:
         return "msg.no_formats"
-    if not settings.sizes:
+    if settings.processing_mode not in ("crop", "resize"):
+        return "msg.invalid_processing_mode"
+    if settings.processing_mode == "crop" and not settings.sizes:
         return "msg.no_sizes"
+    if settings.processing_mode == "resize":
+        if settings.resize_axis not in ("width", "height"):
+            return "msg.resize_invalid"
+        if settings.resize_value < 1:
+            return "msg.resize_invalid"
+        if settings.resize_value > _RESIZE_MAX_SIZE:
+            return "msg.resize_too_large"
     unknown = set(settings.formats) - set(EXPORT_FORMATS)
     if unknown:
         return "msg.no_formats"
-    if any(w < 1 or h < 1 for w, h in settings.sizes):
+    if settings.processing_mode == "crop" and any(
+            w < 1 or h < 1 for w, h in settings.sizes):
         return "msg.no_sizes"
     # ICO frames are limited to 256px by the Windows icon spec.
-    if ("ico" in settings.formats
+    if (settings.processing_mode == "crop" and "ico" in settings.formats
             and any(w > _ICO_MAX_SIZE or h > _ICO_MAX_SIZE
                     for w, h in settings.sizes)):
         return "msg.ico_too_large"
@@ -107,10 +121,23 @@ def export_crop(source: Path, crop: CropState,
         result.error = str(exc)
         return result
 
-    cropped = _apply_brightness(
-        _crop_with_padding(image, crop, settings.wrap), settings.brightness)
-
-    sizes = _dedup_sizes(settings.sizes)
+    if settings.processing_mode == "resize":
+        cropped = _apply_brightness(image, settings.brightness)
+        sizes = [proportional_size(
+            image.width, image.height,
+            settings.resize_axis, settings.resize_value)]
+        if any(w > _RESIZE_MAX_SIZE or h > _RESIZE_MAX_SIZE for w, h in sizes):
+            result.error = "msg.resize_too_large"
+            return result
+        if ("ico" in settings.formats
+                and any(w > _ICO_MAX_SIZE or h > _ICO_MAX_SIZE
+                        for w, h in sizes)):
+            result.error = "msg.ico_too_large"
+            return result
+    else:
+        cropped = _apply_brightness(
+            _crop_with_padding(image, crop, settings.wrap), settings.brightness)
+        sizes = _dedup_sizes(settings.sizes)
     try:
         settings.output_dir.mkdir(parents=True, exist_ok=True)
         if "ico" in settings.formats:
@@ -142,6 +169,23 @@ def crop_to_preview(source: Path, crop: CropState,
     """
     cropped = _crop_with_padding(_open_rgba(source), crop, wrap)
     return _scaled_to_fit(_apply_brightness(cropped, brightness), max_size)
+
+
+def image_to_preview(source: Path, max_size: int = 256,
+                     brightness: int = 0) -> Image.Image:
+    """Return a full-image preview for proportional-resize mode."""
+    return _scaled_to_fit(
+        _apply_brightness(_open_rgba(source), brightness), max_size)
+
+
+def proportional_size(width: int, height: int, axis: str,
+                      value: int) -> Size:
+    """Calculate an aspect-preserving size with one requested edge fixed."""
+    if width < 1 or height < 1 or value < 1 or axis not in ("width", "height"):
+        raise ValueError("invalid proportional resize arguments")
+    if axis == "width":
+        return value, max(1, round(height * value / width))
+    return max(1, round(width * value / height)), value
 
 
 # --------------------------------------------------------------- internals

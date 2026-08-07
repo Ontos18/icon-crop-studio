@@ -21,12 +21,13 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QRadioButton, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QPushButton, QRadioButton, QSpinBox, QVBoxLayout,
+    QWidget,
 )
 
 from core.config_manager import DEFAULT_SIZE_ENTRIES, ConfigManager
-from core.exporter import EXPORT_FORMATS, ExportSettings
+from core.exporter import EXPORT_FORMATS, ExportSettings, proportional_size
 from core.localization import tr
 from models.crop_box import reduce_aspect
 from models.image_item import ImageStatus
@@ -81,12 +82,27 @@ class ExportPanel(QWidget):
     aspect_changed = Signal(int, int)   # 激活输出尺寸的比例 (aw, ah)
     wrap_mode_changed = Signal(bool)    # 裁切模式单选变化（普通/越界）
     aspect_switched = Signal(int, int)  # 用户切换到不同比例组 (aw, ah)
+    processing_mode_changed = Signal(str)  # "crop" / "resize"
 
     def __init__(self, config_manager: ConfigManager,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._config_manager = config_manager
         config = config_manager.config
+        self._source_size: tuple[int, int] | None = None
+
+        # --- processing mode: crop / proportional resize -----------------
+        self._processing_group = QGroupBox(self)
+        self._mode_crop = QRadioButton(self._processing_group)
+        self._mode_resize = QRadioButton(self._processing_group)
+        mode = config.processing_mode if config.processing_mode in (
+            "crop", "resize") else "crop"
+        self._mode_crop.setChecked(mode == "crop")
+        self._mode_resize.setChecked(mode == "resize")
+        mode_layout = QHBoxLayout(self._processing_group)
+        mode_layout.addWidget(self._mode_crop)
+        mode_layout.addWidget(self._mode_resize)
+        self._mode_resize.toggled.connect(self._on_processing_mode_toggled)
 
         self.output_picker = PathPicker(
             "panel.export.output_dir", "dialog.open_dir.title", self)
@@ -117,6 +133,34 @@ class ExportPanel(QWidget):
         self._size_checks: dict[tuple[int, int], QCheckBox] = {}
         self._build_size_ui()
 
+        # --- proportional resize controls --------------------------------
+        self._resize_group = QGroupBox(self)
+        self._resize_width = QRadioButton(self._resize_group)
+        self._resize_height = QRadioButton(self._resize_group)
+        axis = config.resize_axis if config.resize_axis in (
+            "width", "height") else "width"
+        self._resize_width.setChecked(axis == "width")
+        self._resize_height.setChecked(axis == "height")
+        self._resize_value = QSpinBox(self._resize_group)
+        self._resize_value.setRange(1, 32768)
+        self._resize_value.setValue(max(1, int(config.resize_value)))
+        self._resize_value.setSuffix(" px")
+        self._resize_result = QLabel(self._resize_group)
+        resize_layout = QVBoxLayout(self._resize_group)
+        axis_row = QHBoxLayout()
+        axis_row.addWidget(self._resize_width)
+        axis_row.addWidget(self._resize_height)
+        axis_row.addStretch(1)
+        resize_layout.addLayout(axis_row)
+        value_row = QHBoxLayout()
+        self._resize_value_label = QLabel(self._resize_group)
+        value_row.addWidget(self._resize_value_label)
+        value_row.addWidget(self._resize_value, 1)
+        resize_layout.addLayout(value_row)
+        resize_layout.addWidget(self._resize_result)
+        self._resize_width.toggled.connect(self._on_resize_setting_changed)
+        self._resize_value.valueChanged.connect(self._on_resize_setting_changed)
+
         # --- 裁切模式：普通 / 包裹 --------------------------------------------
         self._wrap_normal = QRadioButton(self)
         self._wrap_wrap = QRadioButton(self)
@@ -124,7 +168,9 @@ class ExportPanel(QWidget):
         self._wrap_wrap.setChecked(config.wrap_mode)
         # 单选组互斥：只监听“包裹”这一枚即可拿到两种状态的切换。
         self._wrap_wrap.toggled.connect(self._on_wrap_toggled)
-        wrap_row = QHBoxLayout()
+        self._wrap_widget = QWidget(self)
+        wrap_row = QHBoxLayout(self._wrap_widget)
+        wrap_row.setContentsMargins(0, 0, 0, 0)
         wrap_row.setSpacing(8)
         wrap_row.addWidget(self._wrap_normal)
         wrap_row.addWidget(self._wrap_wrap)
@@ -146,7 +192,6 @@ class ExportPanel(QWidget):
         # 左侧缩略图状态角标的图例（灰/蓝/绿/红）。
         self._legend_label = QLabel(self)
         self._legend_label.setTextFormat(Qt.TextFormat.RichText)
-        self._legend_label.setStyleSheet("color: palette(mid);")
 
         self._preview = CropPreview(self)   # Phase 7 live preview
 
@@ -154,15 +199,18 @@ class ExportPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
         layout.addWidget(self.output_picker)
+        layout.addWidget(self._processing_group)
         layout.addWidget(self._format_group)
         layout.addWidget(self._size_group)
-        layout.addLayout(wrap_row)
+        layout.addWidget(self._resize_group)
+        layout.addWidget(self._wrap_widget)
         layout.addWidget(self._auto_next_check)
         layout.addWidget(self._export_button)
         layout.addWidget(self._legend_label)
         layout.addWidget(self._preview, 1)
 
         self.retranslate_ui()
+        self._sync_processing_mode_ui()
         # 保证初始选中集合比例一致，并同步裁切框比例。
         self._apply_active_aspect()
 
@@ -178,7 +226,18 @@ class ExportPanel(QWidget):
             overwrite=config.overwrite_existing,
             template=config.filename_template,
             wrap=self._wrap_wrap.isChecked(),
+            processing_mode=self.processing_mode,
+            resize_axis=self.resize_axis,
+            resize_value=self._resize_value.value(),
         )
+
+    @property
+    def processing_mode(self) -> str:
+        return "resize" if self._mode_resize.isChecked() else "crop"
+
+    @property
+    def resize_axis(self) -> str:
+        return "width" if self._resize_width.isChecked() else "height"
 
     @property
     def auto_next(self) -> bool:
@@ -193,6 +252,19 @@ class ExportPanel(QWidget):
         """Currently checked sizes, in the entry list's order."""
         return [s for s in self._all_sizes if s in self._selected]
 
+    def effective_sizes(self) -> list[tuple[int, int]]:
+        """Actual output sizes for the current image and processing mode."""
+        if self.processing_mode == "crop":
+            return self.selected_sizes()
+        if self._source_size is None:
+            return []
+        return [proportional_size(
+            *self._source_size, self.resize_axis, self._resize_value.value())]
+
+    def set_source_size(self, width: int, height: int) -> None:
+        self._source_size = (width, height) if width > 0 and height > 0 else None
+        self._update_resize_result()
+
     def _legend_text(self) -> str:
         """状态角标图例 HTML（颜色与缩略图角标保持一致）。"""
         names = {
@@ -201,13 +273,20 @@ class ExportPanel(QWidget):
             ImageStatus.EXPORTED: tr("status.name.exported"),
             ImageStatus.FAILED: tr("status.name.failed"),
         }
+        # Rich-text QLabel does not reliably inherit palette text colors from
+        # a stylesheet after a runtime theme switch. Embed the current
+        # WindowText color explicitly so dark mode never leaves black labels.
+        app = QApplication.instance()
+        palette = app.palette() if app is not None else self.palette()
+        text_color = palette.windowText().color().name()
         return "  ".join(
-            f"<span style='color:{_LEGEND_COLORS[s]}'>●</span> {names[s]}"
+            f"<span style='color:{_LEGEND_COLORS[s]}'>●</span> "
+            f"<span style='color:{text_color}'>{names[s]}</span>"
             for s in _LEGEND_ORDER)
 
     def set_preview(self, image) -> None:
         """Feed the live preview; pass a null QImage to clear it."""
-        self._preview.set_preview(image, self.selected_sizes())
+        self._preview.set_preview(image, self.effective_sizes())
 
     def set_wrap_mode(self, wrap: bool) -> None:
         """同步模式单选（由工具栏 action 驱动），不重复广播。"""
@@ -229,8 +308,15 @@ class ExportPanel(QWidget):
 
     def retranslate_ui(self) -> None:
         self.output_picker.retranslate_ui()
+        self._processing_group.setTitle(tr("panel.export.processing"))
+        self._mode_crop.setText(tr("panel.export.processing_crop"))
+        self._mode_resize.setText(tr("panel.export.processing_resize"))
         self._format_group.setTitle(tr("panel.export.formats"))
         self._size_group.setTitle(tr("panel.export.sizes"))
+        self._resize_group.setTitle(tr("panel.export.resize_settings"))
+        self._resize_width.setText(tr("panel.export.resize_by_width"))
+        self._resize_height.setText(tr("panel.export.resize_by_height"))
+        self._resize_value_label.setText(tr("panel.export.resize_value"))
         self._auto_next_check.setText(tr("panel.export.auto_next"))
         self._wrap_normal.setText(tr("panel.export.mode_normal"))
         self._wrap_wrap.setText(tr("panel.export.mode_wrap"))
@@ -241,6 +327,34 @@ class ExportPanel(QWidget):
         self._add_edit.setPlaceholderText(tr("panel.export.custom_hint"))
         self._add_button.setText(tr("panel.export.custom_add"))
         self._preview.update()          # CropPreview 自绘占位文案
+        self._update_resize_result()
+
+    def _on_processing_mode_toggled(self, _checked: bool) -> None:
+        self._sync_processing_mode_ui()
+        self._persist()
+        self.processing_mode_changed.emit(self.processing_mode)
+        self.settings_changed.emit()
+
+    def _sync_processing_mode_ui(self) -> None:
+        resizing = self.processing_mode == "resize"
+        self._size_group.setVisible(not resizing)
+        self._wrap_widget.setVisible(not resizing)
+        self._resize_group.setVisible(resizing)
+        self._update_resize_result()
+
+    def _on_resize_setting_changed(self, *_args: object) -> None:
+        self._persist()
+        self._update_resize_result()
+        self.settings_changed.emit()
+
+    def _update_resize_result(self) -> None:
+        sizes = self.effective_sizes()
+        if sizes:
+            w, h = sizes[0]
+            text = tr("panel.export.resize_result", width=w, height=h)
+        else:
+            text = tr("panel.export.resize_result_empty")
+        self._resize_result.setText(text)
 
     # ------------------------------------------------------- size panel
     def _build_size_ui(self) -> None:
@@ -387,4 +501,7 @@ class ExportPanel(QWidget):
         config.selected_sizes = [
             list(s) for s in self._all_sizes if s in self._selected]
         config.auto_next_after_export = self._auto_next_check.isChecked()
+        config.processing_mode = self.processing_mode
+        config.resize_axis = self.resize_axis
+        config.resize_value = self._resize_value.value()
         self._config_manager.save()

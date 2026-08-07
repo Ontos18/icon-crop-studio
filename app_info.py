@@ -11,7 +11,7 @@ from pathlib import Path
 
 APP_NAME: str = "Icon Crop Studio"
 APP_ID: str = "IconCropStudio"          # used for config / log folder names
-APP_VERSION: str = "0.7.0"              # Phases 5/7/8/9/10/11/12 complete
+APP_VERSION: str = "0.8.0"              # proportional-resize mode
 ORG_NAME: str = "IconCropStudio"
 
 #: 应用图标（仓库根目录的 ICO 文件，256×256）。
